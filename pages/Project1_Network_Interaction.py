@@ -9,6 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
 from scipy.stats import chisquare
+from statsmodels.stats.multitest import multipletests
 
 st.set_page_config(page_title="Network Interaction", layout="wide")
 
@@ -183,7 +184,8 @@ def plot_sv_barchart(intra_df):
 
     # Chi-square test per (type, chromosome): observed vs expected from avg proportion
     # Expected = avg_prop[t] * total_per_chr[c]; table = [O, N-O] vs [E, N-E]
-    significant = set()
+    # BH correction applied across all 5 types × 23 chromosomes = ~115 tests
+    pvals, keys = [], []
     for ti, t in enumerate(INTRA_TYPES):
         for c in chroms:
             N = total_per_chr[c]
@@ -193,10 +195,15 @@ def plot_sv_barchart(intra_df):
             O = intra_df.loc[c, t]
             try:
                 _, p = chisquare([O, N - O], f_exp=[E, N - E])
-                if p < 0.05:
-                    significant.add((ti, c))
+                pvals.append(p)
+                keys.append((ti, c))
             except Exception:
                 pass
+
+    significant = set()
+    if pvals:
+        reject, _, _, _ = multipletests(pvals, alpha=0.05, method="fdr_bh")
+        significant = {k for k, r in zip(keys, reject) if r}
 
     # Cumulative bar bottoms for star placement
     cum = np.zeros(len(chroms))
@@ -237,7 +244,7 @@ def plot_sv_barchart(intra_df):
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode="markers",
         marker=dict(symbol="asterisk", size=10, color="black", line=dict(width=2, color="black")),
-        name="chi-square p < 0.05",
+        name="chi-square, BH FDR q < 0.05",
         showlegend=True, hoverinfo="skip",
     ))
 
@@ -539,7 +546,7 @@ with col2:
 #st.markdown("**Intra-Chromosomal SV Events**")
 st.plotly_chart(plot_sv_barchart(intra_df), use_container_width=True)
 st.markdown("Each bar segment represents a type of intra-chromosomal SV event. "
-            "A star indicates a significant deviation from the average proportion across chromosomes (chi-square test, p < 0.05).")
+            "A star indicates a significant deviation from the average proportion across chromosomes (chi-square test with Benjamini–Hochberg FDR correction, q < 0.05).")
 st.divider()
 
 # ═══ Example 2 ════════════════════════════════════════════════════════════════
