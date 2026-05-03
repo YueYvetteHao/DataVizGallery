@@ -213,6 +213,7 @@ def plot_sv_barchart(intra_df):
             marker_color=color,
             marker_line_color="white",
             marker_line_width=0.4,
+            textfont=dict(color="black"),
         ))
 
     # Overlay "*" per category at midpoint of each significant segment
@@ -576,7 +577,7 @@ fig_t2 = go.Figure(go.Table(
     cells=dict(
         values=[_t2_metrics, _t2_values],
         fill_color=_t2_cell_colors,
-        font=dict(size=12),
+        font=dict(color="black", size=12),
         align=["left", "center"],
         height=30,
     ),
