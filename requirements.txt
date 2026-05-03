@@ -2,3 +2,4 @@ networkx
 pyvis
 nilearn
 plotly
+statsmodels
