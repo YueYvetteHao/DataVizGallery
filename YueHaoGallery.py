@@ -1,5 +1,6 @@
 import streamlit as st
 
+# Page configuration and main title
 st.set_page_config(page_title="Visualization Gallery", layout="wide")
 
 st.title("Yue Hao Data Visualization Gallery")
@@ -7,6 +8,7 @@ st.caption("Select a project from the sidebar to explore.")
 
 st.divider()
 
+# Three-column layout: one card per project with description and navigation link
 col1, col2, col3 = st.columns(3)
 
 with col1:

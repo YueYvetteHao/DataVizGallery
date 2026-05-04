@@ -6,6 +6,7 @@ Requires: pandas, numpy, xgboost, scikit-learn, scipy
 
 Outputs: xgboost_artifacts.pkl
 """
+# Standard library and ML imports
 import os
 import pickle
 import numpy as np
@@ -19,16 +20,21 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_curve, 
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
 
+# Resolve paths relative to this script so it works from any working directory
 DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── 1. Load data ──────────────────────────────────────────────────────────────
+# merged: cell line × drug sensitivity table (GDSC2 Z_SCOREs joined with CCLE metadata)
+# top_500_genes: expression matrix for the 500 most variable genes across cell lines
 print("Loading data...")
 merged = pd.read_csv(os.path.join(DIR, "glioma_gdsc_ccle_merged.csv"))
 top_500_genes = pd.read_csv(os.path.join(DIR, "top_500_variable_genes_expression.csv"))
 
 drug_target = ("Staurosporine", "Sepantronium bromide")
 
-# ── 2. Build Decision labels ──────────────────────────────────────────────────
+# ── 2. Build decision labels ──────────────────────────────────────────────────
+# For each cell line, the "better" drug is the one with the lower Z_SCORE
+# (more negative Z_SCORE = greater sensitivity relative to the panel)
 decision_map = (
     merged[merged["DRUG_NAME"].isin(drug_target)]
     .dropna(subset=["Z_SCORE"])
@@ -38,6 +44,8 @@ decision_map = (
 merged["Decision"] = merged["CELL_LINE_NAME"].map(decision_map)
 
 # ── 3. Build feature matrix ───────────────────────────────────────────────────
+# Transpose the gene expression table so rows = cell lines, columns = genes
+# Strip hyphens from cell line names to align with CCLE naming convention
 gene_desc_map = top_500_genes.set_index("Name")["Description"].to_dict()
 expr = top_500_genes.set_index("Name").drop(columns=["Description"], errors="ignore")
 X_all = expr.T.copy()
@@ -53,9 +61,11 @@ decision_per_cl["CELL_LINE_NAME_STRIPPED"] = (
     decision_per_cl["CELL_LINE_NAME"].str.replace("-", "", regex=False)
 )
 decision_per_cl = decision_per_cl.set_index("CELL_LINE_NAME_STRIPPED")
+# Inner join keeps only cell lines present in both expression data and drug sensitivity data
 df_model = X_all.join(decision_per_cl[["Decision"]], how="inner")
 
 # ── 4. Filter rare classes ────────────────────────────────────────────────────
+# Drop any drug class with fewer than 5 samples to ensure meaningful CV folds
 class_counts = df_model["Decision"].value_counts()
 valid_classes = class_counts[class_counts >= 5].index
 df_model = df_model[df_model["Decision"].isin(valid_classes)]
@@ -69,10 +79,12 @@ y = le.fit_transform(y_raw)
 gene_names = df_model.columns[:-1].tolist()
 n_classes = len(le.classes_)
 
+# Shared 5-fold stratified CV splitter (preserves class proportions in each fold)
 cv5 = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 
 def _top20_importance(importances):
+    """Return the top-20 features by importance with gene name and description."""
     top_idx = np.argsort(importances)[-20:][::-1]
     return [
         {
@@ -85,6 +97,7 @@ def _top20_importance(importances):
 
 
 # ── 5. Base XGBoost ───────────────────────────────────────────────────────────
+# Manually chosen starting hyperparameters; serves as a performance baseline
 print("\nBase XGBoost...")
 base_xgb = xgb.XGBClassifier(
     n_estimators=300, max_depth=4, learning_rate=0.05,
@@ -101,6 +114,8 @@ base_xgb.fit(X, y)
 print(f"Base XGBoost: {base_xgb_cv.mean():.3f} ± {base_xgb_cv.std():.3f}")
 
 # ── 6. Tuned XGBoost (RandomizedSearchCV) ────────────────────────────────────
+# 3000 random draws across 7 hyperparameters; high n_iter compensates for the
+# large continuous search space (learning_rate, subsample, etc.)
 print("\nTuned XGBoost (RandomizedSearchCV, n_iter=3000)...")
 xgb_param_dist = {
     "n_estimators":     randint(100, 600),
@@ -136,6 +151,7 @@ tuned_xgb_report = classification_report(
 print(f"Tuned XGBoost: {tuned_xgb_cv.mean():.3f} ± {tuned_xgb_cv.std():.3f}")
 
 # ── 7. Base Random Forest ─────────────────────────────────────────────────────
+# Unpruned forest (max_depth=None) with 500 trees as the RF baseline
 print("\nBase Random Forest...")
 base_rf = RandomForestClassifier(
     n_estimators=500, max_depth=None, min_samples_leaf=1, random_state=42, n_jobs=-1,
@@ -150,6 +166,7 @@ base_rf.fit(X, y)
 print(f"Base Random Forest: {base_rf_cv.mean():.3f} ± {base_rf_cv.std():.3f}")
 
 # ── 8. Tuned Random Forest (RandomizedSearchCV) ───────────────────────────────
+# Smaller search (100 iterations) since RF has fewer continuous hyperparameters
 print("\nTuned Random Forest (RandomizedSearchCV, n_iter=100)...")
 rf_param_dist = {
     "n_estimators":      randint(100, 800),
@@ -182,10 +199,12 @@ tuned_rf_report = classification_report(
 )
 print(f"Tuned Random Forest: {tuned_rf_cv.mean():.3f} ± {tuned_rf_cv.std():.3f}")
 
-# ── 9. ROC curves (OOF predict_proba, all 4 models) ──────────────────────────
+# ── 9. ROC curves (out-of-fold predict_proba, all 4 models) ──────────────────
+# label_binarize converts the integer class labels to a one-vs-rest binary matrix
+# so roc_curve can be computed independently for each class
 print("\nROC curves...")
 y_bin = label_binarize(y, classes=np.arange(n_classes))
-if y_bin.shape[1] == 1:
+if y_bin.shape[1] == 1:  # binary case returns shape (n,1); expand to (n,2)
     y_bin = np.hstack([1 - y_bin, y_bin])
 
 roc_data = {}
@@ -195,6 +214,7 @@ for mname, mobj in [
     ("Base Random Forest", base_rf),
     ("Tuned Random Forest", tuned_rf),
 ]:
+    # Use out-of-fold probabilities to avoid overfitting bias in ROC curves
     y_proba = cross_val_predict(
         mobj, X, y,
         cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
@@ -209,7 +229,9 @@ for mname, mobj in [
             "auc": float(auc(fpr, tpr)),
         }
 
-# ── 10. Save ──────────────────────────────────────────────────────────────────
+# ── 10. Assemble and save artifact bundle ─────────────────────────────────────
+# All model outputs are packed into a single pickle so the Streamlit app
+# can load pre-computed results without re-running training at startup
 artifacts = {
     "task": "Drug decision prediction for glioma cell lines",
     "drugs": list(drug_target),

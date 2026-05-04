@@ -3,6 +3,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from nilearn import datasets, surface
 
+# Page configuration
 st.set_page_config(page_title="3D Brain Visualization", layout="wide")
 
 # Aggregate lobar counts from: Valenzuela-Fuenzalida et al., JCM 2024, n=6,224
@@ -16,7 +17,7 @@ JCM_2024 = {
     "insula":   {"total":  101, "left_frac": 0.485},
 }
 
-# Destrieux region keyword → clinical lobe mapping
+# Substring keywords used to match Destrieux region names to clinical lobes
 LOBE_KEYWORDS = {
     "frontal":  ["front"],
     "temporal": ["temp"],
@@ -26,7 +27,7 @@ LOBE_KEYWORDS = {
 }
 
 
-
+# Fetch FSAverage5 surface meshes and Destrieux parcellation from nilearn
 @st.cache_data
 def load_brain_data():
     fs = datasets.fetch_surf_fsaverage("fsaverage5")
@@ -49,19 +50,26 @@ def load_brain_data():
 
 @st.cache_data
 def compute_occurrence(region_names):
+    """Map JCM_2024 case counts onto Destrieux regions by keyword-based lobe matching.
+
+    Cases for each lobe are distributed evenly across the Destrieux regions
+    whose names contain a matching keyword, then normalized to [0, 1].
+    """
     n = len(region_names)
     lh_counts = np.zeros(n)
     rh_counts = np.zeros(n)
 
+    # Count how many Destrieux regions map to each clinical lobe
     regions_per_lobe = {lobe: 0 for lobe in JCM_2024}
     for ridx, rname in enumerate(region_names):
-        if ridx == 0:
+        if ridx == 0:  # index 0 is the "unknown/medial wall" label — skip
             continue
         rlow = rname.lower()
         for lobe, kws in LOBE_KEYWORDS.items():
             if lobe in JCM_2024 and any(kw in rlow for kw in kws):
                 regions_per_lobe[lobe] += 1
 
+    # Distribute total lobe cases evenly across matching regions for each hemisphere
     for ridx, rname in enumerate(region_names):
         if ridx == 0:
             continue
@@ -73,6 +81,7 @@ def compute_occurrence(region_names):
                 lh_counts[ridx] += data["total"] * data["left_frac"] / n_reg
                 rh_counts[ridx] += data["total"] * (1 - data["left_frac"]) / n_reg
 
+    # Normalize so both hemispheres share the same color scale
     max_count = max(lh_counts.max(), rh_counts.max(), 1)
     return lh_counts / max_count, rh_counts / max_count, lh_counts, rh_counts
 
@@ -88,7 +97,7 @@ def compute_occurrence(region_names):
 
 lh_occ, rh_occ, lh_raw, rh_raw = compute_occurrence(tuple(region_names))
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar controls ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Brain Visualization")
     surf_type  = st.radio("Surface", ["Pial", "Inflated"], horizontal=True)
@@ -96,7 +105,8 @@ with st.sidebar:
     opacity    = st.slider("Surface opacity", 0.2, 1.0, 0.55, 0.05)
     colorscale = st.selectbox("Color scale", ["Blues", "Reds", "Plasma"], index=0)
 
-# ── Select surface ────────────────────────────────────────────────────────────
+# ── Select surface coordinates ────────────────────────────────────────────────
+# For inflated surfaces, offset left/right hemispheres on the x-axis for side-by-side display
 if surf_type == "Pial":
     l_coords, l_faces = pial_l_coords, pial_l_faces
     r_coords, r_faces = pial_r_coords, pial_r_faces
@@ -109,6 +119,7 @@ else:
 
 
 def make_vertex_arrays(labels, occ, raw):
+    """Build per-vertex intensity values and hover tooltips from region labels."""
     vals = np.array([occ[min(int(v), len(occ) - 1)] for v in labels])
     hover = [
         f"<b>{region_names[min(int(v), len(region_names) - 1)]}</b>"
@@ -119,6 +130,7 @@ def make_vertex_arrays(labels, occ, raw):
 
 
 def mesh_trace(coords, faces, labels, occ, raw, name, showscale=False):
+    """Create a Plotly Mesh3d trace colored by normalized tumor occurrence per vertex."""
     x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
     i, j, k = faces[:, 0], faces[:, 1], faces[:, 2]
     vals, hover = make_vertex_arrays(labels, occ, raw)
@@ -142,6 +154,7 @@ def mesh_trace(coords, faces, labels, occ, raw, name, showscale=False):
 
 # ── Build figure ──────────────────────────────────────────────────────────────
 fig = go.Figure()
+# Add mesh traces based on hemisphere selection; only the rightmost trace shows the colorbar
 if hemisphere in ("Both", "Left"):
     fig.add_trace(mesh_trace(l_coords, l_faces, labels_l, lh_occ, lh_raw, "Left",
                              showscale=(hemisphere == "Left")))
@@ -149,6 +162,7 @@ if hemisphere in ("Both", "Right"):
     fig.add_trace(mesh_trace(r_coords, r_faces, labels_r, rh_occ, rh_raw, "Right",
                              showscale=True))
 
+# 72 animation frames rotating the camera 360° in 5° steps for the auto-spin feature
 frames = [
     go.Frame(layout=dict(scene_camera=dict(
         eye=dict(x=2.2 * np.sin(np.radians(a)),
@@ -173,6 +187,7 @@ fig.update_layout(
         bgcolor="white",
         camera=dict(eye=dict(x=0, y=2.2, z=0.6)),
     ),
+    # Play/Pause buttons control the rotation animation
     updatemenus=[dict(
         type="buttons",
         showactive=False,
@@ -188,7 +203,7 @@ fig.update_layout(
     )],
 )
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Page title and project description ───────────────────────────────────────
 st.title("Project 3 · 3D Brain Visualization")
 st.caption(
     "GBM tumor locations mapped to Destrieux cortical atlas  ·  "
@@ -218,6 +233,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Cases", "6,224")
 c2.metric("Left Cases (est.)", f"{int(lh_raw.sum()):,}")
 c3.metric("Right Cases (est.)", f"{int(rh_raw.sum()):,}")
+# Identify the most affected lobe by summing estimated raw counts across both hemispheres
 lobe_totals = {
     lobe: int(
         lh_raw[[i for i, r in enumerate(region_names) if any(kw in r.lower() for kw in kws)]].sum()
@@ -229,7 +245,7 @@ c4.metric("Most Affected Lobe", max(lobe_totals, key=lobe_totals.get).capitalize
 
 st.plotly_chart(fig, width="stretch")
 
-# ── Lobe summary ──────────────────────────────────────────────────────────────
+# ── Lobe summary table ────────────────────────────────────────────────────────
 st.subheader("Cases by Lobe")
 lobe_data = []
 for lobe, kws in LOBE_KEYWORDS.items():

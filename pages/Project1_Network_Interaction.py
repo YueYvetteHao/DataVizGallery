@@ -11,11 +11,12 @@ from pyvis.network import Network
 from scipy.stats import chisquare
 from statsmodels.stats.multitest import multipletests
 
+# Page configuration and shared constants
 st.set_page_config(page_title="Network Interaction", layout="wide")
-
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 
+# Human chromosome list (autosomes + X); strip-prefix labels used for axis ticks
 CHROMS = [
     "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8",
     "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16",
@@ -28,11 +29,13 @@ CHR_LABELS = [c.replace("chr", "") for c in CHROMS]
 
 @st.cache_data
 def load_sv_log():
+    """Load simulated structural variation log (one SV event per row)."""
     return pd.read_csv(os.path.join(DATA_DIR, "simulated_sv_log.csv"))
 
 
 @st.cache_data
 def load_network_data():
+    """Load Arabidopsis metabolic network: node table (ID, Ka/Ks, gene count) and edge list."""
     nodes = pd.read_csv(
         os.path.join(DATA_DIR, "AtAl_KaKs_per_rxn_numgene.txt"),
         sep=r"\s+", header=None, names=["ID", "KaKs", "numgene"], engine="python",
@@ -48,12 +51,14 @@ def load_network_data():
 
 @st.cache_data
 def get_translocation_matrix():
+    """Build a symmetric 23×23 matrix counting inter-chromosomal translocation events."""
     sv_log = load_sv_log()
     trans = pd.DataFrame(0, index=CHROMS, columns=CHROMS)
     df = sv_log[sv_log["type"] == "translocation"]
     for _, row in df.iterrows():
         d, r = row["donor"], row["recipient"]
         if d in trans.index and r in trans.columns:
+            # Count each event for both chromosomes (undirected)
             trans.loc[d, r] += 1
             trans.loc[r, d] += 1
     trans.index = CHR_LABELS
@@ -63,9 +68,11 @@ def get_translocation_matrix():
 
 @st.cache_data
 def get_intra_sv_counts():
+    """Count intra-chromosomal SV events by type and chromosome."""
     sv_log = load_sv_log()
     INTRA_TYPES = ["full_deletion", "partial_deletion", "duplication", "fragmentation", "fusion"]
 
+    # Fusions use the same "chrom" column but are stored separately — merge for uniform handling
     non_fusion = sv_log[
         sv_log["type"].isin(["full_deletion", "partial_deletion", "duplication", "fragmentation"])
     ][["type", "chrom"]].dropna()
@@ -89,9 +96,11 @@ def get_intra_sv_counts():
 # ── Plot builders ──────────────────────────────────────────────────────────────
 
 def plot_translocation_heatmap(trans_matrix, intra_df):
+    """Lower-triangle heatmap of inter-chromosomal translocations with per-chromosome SV tooltips."""
     labels = trans_matrix.columns.tolist()
     n = len(labels)
     z = trans_matrix.values.astype(float)
+    # Mask upper triangle and diagonal so only lower-triangle cells are visible
     mask = np.triu(np.ones_like(z, dtype=bool), k=0)
     z_masked = z.copy()
     z_masked[mask] = np.nan
@@ -107,6 +116,7 @@ def plot_translocation_heatmap(trans_matrix, intra_df):
     INTRA_LABELS = ["Full deletion", "Partial deletion", "Duplication", "Fragmentation", "Fusion"]
     INTRA_COLORS = ["#8B0000", "#e8a0a0", "#2ecc71", "#3498db", "#e67e22"]
 
+    # Build rich HTML tooltip for each chromosome's intra-SV breakdown
     sv_hover = []
     for lbl in labels:
         lines = [f"<b>chr{lbl} — intra-chr SVs</b>"]
@@ -136,8 +146,8 @@ def plot_translocation_heatmap(trans_matrix, intra_df):
         name="",
     ))
 
-    # Invisible row of points just below the last heatmap row, one per chromosome.
-    # Hovering near the x-axis chromosome labels triggers their SV breakdown tooltip.
+    # Invisible scatter row below the heatmap — hovering near chromosome x-axis labels
+    # triggers the intra-SV tooltip without cluttering the heatmap cells
     fig.add_trace(go.Scatter(
         x=list(range(n)),
         y=[n] * n,
@@ -169,6 +179,11 @@ def plot_translocation_heatmap(trans_matrix, intra_df):
 
 
 def plot_sv_barchart(intra_df):
+    """Stacked bar chart of intra-chromosomal SV events with chi-square significance stars.
+
+    Stars mark categories where the observed proportion deviates significantly from the
+    genome-wide average (chi-square test, Benjamini–Hochberg FDR correction, q < 0.05).
+    """
     INTRA_TYPES  = ["full_deletion", "partial_deletion", "duplication", "fragmentation", "fusion"]
     INTRA_LABELS = ["Full deletion", "Partial deletion", "Duplication", "Fragmentation", "Fusion"]
     INTRA_COLORS = ["#8B0000", "#e8a0a0", "#2ecc71", "#3498db", "#e67e22"]
@@ -178,9 +193,8 @@ def plot_sv_barchart(intra_df):
     total_per_chr  = intra_df.sum(axis=1)
     avg_prop       = intra_df.sum(axis=0) / intra_df.values.sum()
 
-    # Chi-square test per (type, chromosome): observed vs expected from avg proportion
-    # Expected = avg_prop[t] * total_per_chr[c]; table = [O, N-O] vs [E, N-E]
-    # BH correction applied across all 5 types × 23 chromosomes = ~115 tests
+    # Chi-square test per (type, chromosome): observed vs expected from avg proportion.
+    # Table: [O, N-O] vs [E, N-E]; BH correction over ~115 tests (5 types × 23 chromosomes).
     pvals, keys = [], []
     for ti, t in enumerate(INTRA_TYPES):
         for c in chroms:
@@ -201,7 +215,7 @@ def plot_sv_barchart(intra_df):
         reject, _, _, _ = multipletests(pvals, alpha=0.05, method="fdr_bh")
         significant = {k for k, r in zip(keys, reject) if r}
 
-    # Cumulative bar bottoms for star placement
+    # Pre-compute cumulative bar bottoms so star annotations sit at the segment midpoint
     cum = np.zeros(len(chroms))
     bottoms = {}
     for ti, t in enumerate(INTRA_TYPES):
@@ -219,7 +233,7 @@ def plot_sv_barchart(intra_df):
             textfont=dict(color="black"),
         ))
 
-    # Overlay "*" per category at midpoint of each significant segment
+    # Overlay "*" text markers at the midpoint of each statistically significant bar segment
     for ti, t in enumerate(INTRA_TYPES):
         sig_x, sig_y = [], []
         for ci, c in enumerate(chroms):
@@ -236,7 +250,7 @@ def plot_sv_barchart(intra_df):
                 showlegend=False, hoverinfo="skip",
             ))
 
-    # Legend footnote for significance marker
+    # Dummy trace to add the significance legend entry
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode="markers",
         marker=dict(symbol="asterisk", size=10, color="black", line=dict(width=2, color="black")),
@@ -265,6 +279,7 @@ def plot_sv_barchart(intra_df):
 
 
 def build_chr_pyvis_net(trans_matrix, gravity, central_gravity, spring_length, spring_strength, damping):
+    """Build a PyVis network of chromosome interactions; nodes sized/colored by weighted degree."""
     net = Network(height="450px", width="100%", bgcolor="#ffffff", font_color="#111111", notebook=False)
     labels = trans_matrix.columns.tolist()
 
@@ -285,7 +300,7 @@ def build_chr_pyvis_net(trans_matrix, gravity, central_gravity, spring_length, s
     edge_weights = [G[u][v]["weight"] for u, v in G.edges()]
     max_w = max(edge_weights) if edge_weights else 1
 
-    # Interpolate #fff5f5 → #8B0000 (dark red), normalized over actual degree range
+    # Interpolate hex #fff5f5 → #8B0000 (light pink → dark red) based on normalized degree
     def _node_color(ratio):
         r = int(0xFF + (0x8B - 0xFF) * ratio)
         g = int(0xF5 + (0x00 - 0xF5) * ratio)
@@ -305,6 +320,7 @@ def build_chr_pyvis_net(trans_matrix, gravity, central_gravity, spring_length, s
         net.add_edge(u, v, value=w, title=f"{w} translocations",
                      width=0.5 + 4.0 * (w / max_w))
 
+    # Physics options passed as JSON string to vis.js via PyVis
     net.set_options(f"""
     {{
       "physics": {{
@@ -328,9 +344,16 @@ def build_chr_pyvis_net(trans_matrix, gravity, central_gravity, spring_length, s
 
 
 def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_distance, central_gravity, spring_length, spring_strength, damping):
+    """Build a PyVis network for the Arabidopsis metabolic graph with Ka/Ks diverging color scheme.
+
+    Uses 20% of nodes (random sample) to keep rendering fast in the browser.
+    Node color encodes Ka/Ks: red = below-mean (high constraint), blue = above-mean (relaxed selection).
+    """
+    # Sample 20% of nodes for browser performance; keep only edges between sampled nodes
     nodes_df = nodes_df.sample(frac=0.2, random_state=42).reset_index(drop=True)
     node_ids = set(nodes_df["ID"])
     valid_edges = edges_df[edges_df["Source"].isin(node_ids) & edges_df["Target"].isin(node_ids)]
+    # Retain only nodes that have at least one edge after sampling
     connected = set(valid_edges["Source"]) | set(valid_edges["Target"])
     nodes_df = nodes_df[nodes_df["ID"].isin(connected)].reset_index(drop=True)
 
@@ -338,8 +361,9 @@ def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_dista
     kaks_max_dev = (nodes_df["KaKs"] - kaks_mean).abs().max() or 1
 
     # Diverging color: red (#d62728) ← white ← mean → white → blue (#1f77b4)
+    # ratio in [-1, 1] where -1 = min(Ka/Ks), 0 = mean, +1 = max(Ka/Ks)
     def _kaks_color(kaks):
-        ratio = (kaks - kaks_mean) / kaks_max_dev  # [-1, 1]
+        ratio = (kaks - kaks_mean) / kaks_max_dev
         if ratio <= 0:
             t = -ratio
             r = int(255 + (214 - 255) * t)
@@ -359,6 +383,7 @@ def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_dista
         nid   = row["ID"]
         kaks  = row["KaKs"]
         ng    = row["numgene"]
+        # Node size scales with square root of gene count to compress the range
         size  = 8 + 4 * (ng ** 0.5)
         color = _kaks_color(kaks)
         title = f"{nid}  Ka/Ks: {kaks:.4f}"
@@ -367,6 +392,8 @@ def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_dista
     for _, row in valid_edges.iterrows():
         net.add_edge(row["Source"], row["Target"])
 
+    # Build solver-specific physics block; barnesHut uses a 20× gravity multiplier
+    # because its gravitationalConstant operates on a different scale than forceAtlas2
     if layout_solver == "barnesHut":
         solver_block = (
             f'"barnesHut": {{"gravitationalConstant": {gravity * 20},'
@@ -412,6 +439,7 @@ def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_dista
     }}
     """)
 
+    # Return color-scale metadata so the caller can inject a matching legend
     color_info = {
         "title": "Ka/Ks",
         "high": "#1f77b4",
@@ -425,6 +453,11 @@ def build_arabidopsis_net(nodes_df, edges_df, layout_solver, gravity, node_dista
 
 
 def render_net_html(net, height=460, colorbar=None):
+    """Save PyVis network to a temp file, inject an optional CSS colorbar legend, and render inline.
+
+    PyVis requires a real file path to generate the HTML; the file is deleted after reading.
+    The colorbar is injected as a fixed-position div just before </body>.
+    """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
         tmp_path = f.name
     net.save_graph(tmp_path)
@@ -432,6 +465,7 @@ def render_net_html(net, height=460, colorbar=None):
         html = f.read()
     os.unlink(tmp_path)
     if colorbar is not None:
+        # Build a CSS linear-gradient matching the node color scheme
         if "mid" in colorbar:
             gradient = f"linear-gradient(to bottom,{colorbar['high']},{colorbar['mid']},{colorbar['low']})"
             extra = f'\n  <span style="font-size:10px;color:#888">avg {colorbar["mid_val"]}</span>'
@@ -459,6 +493,7 @@ def render_net_html(net, height=460, colorbar=None):
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # Physics sliders for the chromosome interaction network (Example 1)
     st.header("Example 1 · Chr Network Physics")
     chr_gravity = st.slider("Gravitational Constant", -200, -10, -80, step=5,
                             key="chr_gravity",
@@ -476,10 +511,12 @@ with st.sidebar:
                             key="chr_damping",
                             help="Velocity damping. Higher = settles faster.")
     st.divider()
+    # Physics sliders for the Arabidopsis metabolic network (Example 2)
     st.header("Example 2 · Network Physics")
     _LAYOUTS = {"Force Atlas 2": "forceAtlas2Based", "Barnes-Hut": "barnesHut", "Repulsion": "repulsion"}
     layout_label = st.selectbox("Layout", list(_LAYOUTS.keys()), key="ex2_layout")
     layout_solver = _LAYOUTS[layout_label]
+    # Repulsion solver exposes node distance instead of gravitational constant
     if layout_solver == "repulsion":
         node_distance = st.slider("Node Distance (px)", 50, 400, 120, step=10,
                                   key="node_distance",
@@ -511,13 +548,16 @@ st.markdown("This page demonstrates interactive network visualizations using [Py
 # ═══ Example 1 ════════════════════════════════════════════════════════════════
 st.subheader("Example 1 · Comprehensive Visualization of Chromosomal Interactions")
 st.markdown(
-    "Cancers like [osteosarcoma](https://pubmed.ncbi.nlm.nih.gov/39814020/) exhibit complex strural variation landscapes. Here I simulated the copy-number profiles for 100 cells to demonstrate the visualization of inter-chromosomal interactions, as well as intra-chromosomal structural variation statistics." 
+    "Cancers like [osteosarcoma](https://pubmed.ncbi.nlm.nih.gov/39814020/) exhibit complex strural variation landscapes. Here I simulated the copy-number profiles for 100 cells to demonstrate the visualization of inter-chromosomal interactions, as well as intra-chromosomal structural variation statistics."
 )
 
+# Compute derived tables from the SV log (cached after first call)
 trans_matrix = get_translocation_matrix()
 intra_df = get_intra_sv_counts()
 
 st.markdown("Chromosomal translocations: genetic abnormalities where a chromosome attaches to another. The network layout emphasizes clusters of highly interacting chromosomes, while the heatmap provides precise counts.")
+
+# Two-column layout: heatmap on the left, interactive PyVis network on the right
 col1, col2 = st.columns(2)
 
 with col1:
@@ -539,7 +579,7 @@ with col2:
     })
     st.caption("Weighted degree = total translocations involving each chromosome.")
 
-#st.markdown("**Intra-Chromosomal SV Events**")
+# Full-width stacked bar chart of intra-chromosomal SV events with significance annotation
 st.plotly_chart(plot_sv_barchart(intra_df), use_container_width=True)
 st.markdown("Each bar segment represents a type of intra-chromosomal SV event. "
             "A star indicates a significant deviation from the average proportion across chromosomes (chi-square test with Benjamini–Hochberg FDR correction, q < 0.05).")
@@ -548,11 +588,12 @@ st.divider()
 # ═══ Example 2 ════════════════════════════════════════════════════════════════
 st.subheader("Example 2 · *Arabidopsis* 🌱 Network Visualization")
 st.markdown("In this example, I recreated the metabolic network figure in **[Hao et al., *Genome Biol Evol.*, 2018](https://pubmed.ncbi.nlm.nih.gov/29617811/#&gid=article-figures&pid=scfigsc-3-uid-2)**, " \
-"which was originally visualized using [Gephi](https://gephi.org/). The network approach allows us to directly observe how natural selection shapes metabolism. The network here is based on the *Arabidopsis* [AraGEM](https://pubmed.ncbi.nlm.nih.gov/20044452/) metabolic reconstruction, each node represents an enzyme and each edge represents a reaction. By calculating the strength of selection for each component, I’ve mapped the evolutionary constraints between two plant species (*A. thaliana* and *A. lyrata*) onto the network: red identifies areas of high constraint (stringent selection), while blue highlights regions where selection has relaxed. For page load efficiency, I sampled 20% of the nodes and their connected edges from the original dataset, but preserved the same layout and node coloring based on Ka/Ks values.")
+"which was originally visualized using [Gephi](https://gephi.org/). The network approach allows us to directly observe how natural selection shapes metabolism. The network here is based on the *Arabidopsis* [AraGEM](https://pubmed.ncbi.nlm.nih.gov/20044452/) metabolic reconstruction, each node represents an enzyme and each edge represents a reaction. By calculating the strength of selection for each component, I've mapped the evolutionary constraints between two plant species (*A. thaliana* and *A. lyrata*) onto the network: red identifies areas of high constraint (stringent selection), while blue highlights regions where selection has relaxed. For page load efficiency, I sampled 20% of the nodes and their connected edges from the original dataset, but preserved the same layout and node coloring based on Ka/Ks values.")
 st.markdown("Interestingly, a group of interconnected reactions showed relaxed selective constraints (colored in blue). Among these is R08280, an enzymatic reaction that utilizes glutathione to transform aldophosphamide.")
 
 st.caption("Node color: **red** = Ka/Ks below average, **white** = average, **blue** = above average. Node size reflects number of genes encoding each enzyme.")
 
+# Build and render the Arabidopsis metabolic network with Ka/Ks colorbar
 nodes_df, edges_df = load_network_data()
 net2, kaks_color_info = build_arabidopsis_net(
     nodes_df, edges_df,
@@ -561,12 +602,13 @@ net2, kaks_color_info = build_arabidopsis_net(
 )
 render_net_html(net2, height=650, colorbar=kaks_color_info)
 
-st.subheader("Spearman’s Correlations of Selective Constraints (Ka/Ks) and Network Statistics")
+# Correlation table: Ka/Ks vs network topology metrics (pre-computed on full 1,068-node graph)
+st.subheader("Spearman's Correlations of Selective Constraints (Ka/Ks) and Network Statistics")
 st.caption("Calculated for the full network, 1,068 nodes and 14,864 edges.")
 _t2_metrics = [
-    "Selection and Node Degree Spearman’s Correlation ρ", "    p-value",
-    "Selection and Clustering Coefficient Spearman’s Correlation ρ", "    p-value",
-    "Selection and Betweenness Centrality Spearman’s Correlation ρ", "    p-value",
+    "Selection and Node Degree Spearman's Correlation ρ", "    p-value",
+    "Selection and Clustering Coefficient Spearman's Correlation ρ", "    p-value",
+    "Selection and Betweenness Centrality Spearman's Correlation ρ", "    p-value",
 ]
 _t2_values = ["0.0856", "0.002*", "0.1459", "0.000*", "0.0067", "0.443"]
 _t2_cell_colors = [
@@ -596,6 +638,7 @@ st.plotly_chart(fig_t2, use_container_width=True)
 st.caption("ρ = Spearman's correlation coefficient. * p < 0.05. "
            "Source: [Hao et al. 2018](https://pmc.ncbi.nlm.nih.gov/articles/PMC5887293/)")
 
+# Interpretation of the three topology-selection correlations
 st.markdown("""
 Three topological properties of each enzyme node were correlated with its Ka/Ks value to test whether a reaction's structural role in the metabolic network predicts the intensity of natural selection acting on it.
 
@@ -607,5 +650,3 @@ Three topological properties of each enzyme node were correlated with its Ka/Ks 
 
 Taken together, these results suggest that *local* network context (degree and clustering) has a detectable but modest influence on selective pressure, while *global* topological centrality does not. The findings are consistent with a model in which metabolic robustness — rather than essentiality per se — is the primary driver of relaxed selection in plant metabolism.
 """)
-
-
