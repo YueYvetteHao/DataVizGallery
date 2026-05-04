@@ -70,14 +70,10 @@ def get_intra_sv_counts():
         sv_log["type"].isin(["full_deletion", "partial_deletion", "duplication", "fragmentation"])
     ][["type", "chrom"]].dropna()
 
-    fusions = sv_log[sv_log["type"] == "fusion"]
-    fusion_chroms = pd.concat([
-        fusions[["chrom1"]].rename(columns={"chrom1": "chrom"}),
-        fusions[["chrom2"]].rename(columns={"chrom2": "chrom"}),
-    ]).dropna()
-    fusion_chroms["type"] = "fusion"
+    fusions = sv_log[sv_log["type"] == "fusion"][["chrom"]].dropna().copy()
+    fusions["type"] = "fusion"
 
-    all_intra = pd.concat([non_fusion, fusion_chroms])
+    all_intra = pd.concat([non_fusion, fusions])
     grp = all_intra.groupby(["type", "chrom"]).size()
 
     counts = {t: {c: 0 for c in CHROMS} for t in INTRA_TYPES}
